@@ -1,0 +1,270 @@
+#!/bin/bash
+
+
+usage() {
+  echo '''
+usage:  [get|put] <file>|all [-trunc] [-c value]
+        [import|export] all [-d] [-c value]
+                        type [-c value]
+                        type resource [-f] [-c value]
+        test job <job> [-c value]
+             job <job> <components> [-c value]
+             job <job> <component> <test.j2> [-c value]
+             lib <lib> [-c value]
+             lib <lib> <lib.j2> <test.j2> [-c value]
+             func <func> [-c value]
+             func <func> <def.py> <test.j2> [-c value]
+        build <job>|all [-c value]
+        preview <job> [-c value]
+        testcall job [-c value] [-p]
+
+      -c: Snowsql will use the connection specified. 
+          If not specified, It will try environment variables.
+          If still no succeed, it will ask for credentials.
+      -d: get - delete all the .yaml files in the local dir first.
+          put,export - purge the CODE stage first.
+          import - erase all the project data first.
+      -l: export to or import from the local file instead of the one in the CODE stage.
+      -p: enable post-hook.
+      '''
+    exit 1
+}
+
+# Initialize variables
+positional=()
+delete=0
+conn=""
+local=0
+posthook=0
+
+
+while [[ $# -gt 0 && $1 != -* ]]; do
+  positional+=("$1")
+  shift
+done
+
+
+# Parse options using getopts
+while getopts ":dptlpc:" opt; do
+  case $opt in
+    d)
+      delete=1
+      ;;     
+    l)
+      local=1
+      ;;
+    p)
+      posthook=1
+      ;;      
+    c)
+      conn="-c $OPTARG"
+      ;;
+    \?)
+      echo "Invalid option: -$OPTARG" >&2
+      exit 1
+      ;;
+    :)
+      echo "Option -$OPTARG requires an argument." >&2
+      exit 1
+      ;;
+  esac
+done
+
+# Shift processed options away
+shift $((OPTIND - 1))
+
+op=${positional[0]}
+
+case $op in
+    get | put)
+      file=${positional[1]}
+      if [[ $file == "" ]] ; then
+        echo "file name or 'all' is required."
+        exit 1
+      fi
+      ;;
+    import | export)
+      type=${positional[1]}
+      resource=${positional[2]}
+      ;;
+    test)
+      type=${positional[1]}
+      case $type in
+            job)
+              job=${positional[2]}
+              components=${positional[3]}
+              test_file=${positional[4]}
+            ;;
+            lib)
+              lib=${positional[2]}
+              lib_file=${positional[3]}
+              test_file=${positional[4]}
+              if [[ "${lib_file}" != "" && "${test_file}" == "" ]] ; then
+                echo "Error: test file is required."
+                exit 1
+              fi
+            ;;
+            func)
+              func=${positional[2]}
+              def_file=${positional[3]}
+              test_file=${positional[4]}
+              if [[ "${def_file}" != "" && "${test_file}" == "" ]] ; then
+                echo "Error: test file is required."
+                exit 1
+              fi              
+            ;;                        
+      esac
+      ;;
+    build | preview | testcall)
+      job=${positional[1]}
+      ;;
+    "")
+      usage
+      ;;
+esac
+
+
+# Get and Put
+
+if [[ $file == all ]] ; then
+  if [[ $op == get ]] ; then
+    PATTERN=
+  elif [[ $op == put ]] ; then
+    PATTERN=*.yaml
+  fi
+else
+  PATTERN=$file
+fi
+
+
+if [[ $delete -eq 1 && $file == all && $op == get ]] ; then
+  echo Deleting existing YAML files...
+  rm ./*.yaml 2>/dev/null
+fi
+
+if [[ $op == get ]] ; then
+  snowsql -o log_level=DEBUG  ${conn} -q "GET @CODE/${PATTERN} file://. "
+fi
+
+
+if [[ $delete -eq 1 && $file == all && $op == put ]] ; then
+  echo Purging the CODE stage...
+  snowsql -o log_level=DEBUG  ${conn} -q "REMOVE @CODE/"
+fi
+
+if [[ $op == put ]] ; then
+  snowsql -o log_level=DEBUG  ${conn} -q "PUT file://${PATTERN} @CODE/ AUTO_COMPRESS=FALSE OVERWRITE=TRUE"
+fi
+
+snowsql_proc_default="snowsql -o friendly=false -o header=false  -o timing=false -o output_format=plain -o log_level=DEBUG  ${conn}"
+
+# Import and Export
+if [[ $type == all ]] ; then
+  RT=*
+  RN=*
+else
+  RT=$type
+  if [[ -z $resource ]] ; then
+    RN=*
+  else
+    RN=$resource
+  fi
+fi
+
+if [[ $delete -eq 1 ]] ; then
+  DELETE_ALL=TRUE
+else
+  DELETE_ALL=FALSE
+fi
+
+if [[ $op == export && $local == 0 ]] ; then
+  ${snowsql_proc_default} -q "CALL SW_EXPORT_RESOURCES('${RT}','${RN}',${DELETE_ALL})"
+fi
+
+if [[ $op == export  && $local == 1 ]] ; then
+  ${snowsql_proc_default} -q "CALL SW_EXPORT_RESOURCE('${RT}','${RN}')" > ${RT}_${RN}.yaml
+  echo ${RT} ${RN} has been exported to ${RT}_${RN}.yaml.
+fi
+
+
+if [[ $op == import && $local == 0 ]] ; then
+  ${snowsql_proc_default} -q "CALL SW_IMPORT_RESOURCES('${RT}','${RN}',${DELETE_ALL})"
+fi
+
+
+if [[ $op == import  && $local == 1 ]] ; then
+  RDATA=$(cat ${RT}_${RN}.yaml)
+  RDATA=${RDATA//\'/\\\'}
+  echo "CALL SW_IMPORT_RESOURCE('${RT}','${RN}','${RDATA}')" > tmp.sql
+  ${snowsql_proc_default} -f tmp.sql
+  rm tmp.sql
+  echo ${RT}_${RN}.yaml has been improted.
+fi
+
+# Test job component
+if [[ $op == test && $type == job && "${test_file}" == "" ]] ; then
+  ${snowsql_proc_default} -q "CALL SW_TEST_JOB_COMPONENTS('${job}','${components}')"
+fi
+
+if [[ $op == test && $type == job && "${test_file}" != "" ]] ; then
+  TDATA=$(cat ${test_file})
+  TDATA=${TDATA//\'/\\\'}
+  echo "CALL SW_TEST_JOB_COMPONENT('${job}','${components}','${TDATA}')" > tmp.sql
+  ${snowsql_proc_default} -f tmp.sql
+  rm tmp.sql  
+fi
+
+# Test macro lib
+if [[ $op == test && $type == lib && "${lib_file}" == "" ]] ; then
+  ${snowsql_proc_default} -q "CALL SW_TEST_MACRO_LIB('${lib}')"
+fi
+
+if [[ $op == test && $type == lib && "${lib_file}" != ""  && "${test_file}" != "" ]] ; then
+  LDATA=$(cat ${lib_file})
+  LDATA=${LDATA//\'/\\\'}
+  TDATA=$(cat ${test_file})
+  TDATA=${TDATA//\'/\\\'}
+  echo "CALL SW_TEST_MACRO_LIB('${lib}','${LDATA}','${TDATA}')" > tmp.sql
+  ${snowsql_proc_default} -f tmp.sql
+  rm tmp.sql  
+fi
+
+# Test function
+if [[ $op == test && $type == func && "${def_file}" == "" ]] ; then
+  ${snowsql_proc_default} -q "CALL SW_TEST_FUNCTION('${func}')"
+fi
+
+if [[ $op == test && $type == func && "${def_file}" != "" && "${test_file}" != "" ]] ; then
+  LDATA=$(cat ${def_file})
+  LDATA=${LDATA//\'/\\\'}
+  TDATA=$(cat ${test_file})
+  TDATA=${TDATA//\'/\\\'}
+  echo "CALL SW_TEST_FUNCTION('${func}','${LDATA}','${TDATA}')" > tmp.sql
+  ${snowsql_proc_default} -f tmp.sql
+  rm tmp.sql  
+fi
+
+# Buid
+if [[ $op == build && ${job} == all ]] ; then
+  ${snowsql_proc_default} -q "CALL SW_BUILD_ALL_JOBS()"
+fi
+
+if [[ $op == build && ${job} != all ]] ; then
+  ${snowsql_proc_default} -q "CALL SW_BUILD_JOB('${job}')"
+fi
+
+# Preview
+if [[ $op == preview ]] ; then
+  ${snowsql_proc_default} -q "CALL SW_PREVIEW_WEB_REQUEST('${job}')"
+fi
+
+# Make a test call
+if [[ $posthook == 0 ]] ; then
+  ENABLE_POSTHOOK=FALSE
+else
+  ENABLE_POSTHOOK=TRUE
+fi
+
+if [[ $op == testcall ]] ; then
+  ${snowsql_proc_default} -q "CALL SW_MAKE_TEST_CALL('${job}',${ENABLE_POSTHOOK})"
+fi
