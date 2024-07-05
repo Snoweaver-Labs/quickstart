@@ -6,7 +6,7 @@ usage() {
 usage:  [get|put] <file>|all [-trunc] [-c value]
         [import|export] all [-d] [-c value]
                         type [-c value]
-                        type resource [-f] [-c value]
+                        type resource [-l] [-c value]
         test job <job> [-c value]
              job <job> <components> [-c value]
              job <job> <component> <test.j2> [-c value]
@@ -18,16 +18,15 @@ usage:  [get|put] <file>|all [-trunc] [-c value]
         preview <job> [-c value]
         testcall job [-c value] [-p]
 
-      -c: Snowsql will use the connection specified. 
-          If not specified, It will try environment variables.
-          If still no succeed, it will ask for credentials.
-      -d: get - delete all the .yaml files in the local dir first.
-          put,export - purge the CODE stage first.
-          import - erase all the project data first.
-      -l: export to or import from the local file instead of the one in the CODE stage.
-      -p: enable post-hook.
+      -c: Specifies the connection to be used by SnowSQL.
+          If not specified, it will attempt to use the default connection.
+          If unsuccessful, it will prompt for credentials.
+      -d: `get` - Deletes all .yaml files in the local directory first.
+          `put`,`export` - Purges the CODE stage first.
+          `import` - Erases all project data first.
+      -l: Indicates to export to or import from a local file instead of the CODE stage.
+      -p: Enables the post-hook.
       '''
-    exit 1
 }
 
 # Initialize variables
@@ -156,6 +155,17 @@ if [[ $op == put ]] ; then
   snowsql -o log_level=DEBUG  ${conn} -q "PUT file://${PATTERN} @CODE/ AUTO_COMPRESS=FALSE OVERWRITE=TRUE"
 fi
 
+check_result(){
+  local result=$1
+  status=`echo $result | jq -r '.status'`
+  if [[ $status == failed ]] ; then
+    echo $result | jq -r '.data' >&2
+    exit 1
+  else
+    echo $result | jq -r '.data'
+  fi
+}
+
 snowsql_proc_default="snowsql -o friendly=false -o header=false  -o timing=false -o output_format=plain -o log_level=DEBUG  ${conn}"
 
 # Import and Export
@@ -178,17 +188,17 @@ else
 fi
 
 if [[ $op == export && $local == 0 ]] ; then
-  ${snowsql_proc_default} -q "CALL SW_EXPORT_RESOURCES('${RT}','${RN}',${DELETE_ALL})"
+  check_result "`${snowsql_proc_default} -q "CALL SW_EXPORT_RESOURCES('${RT}','${RN}',${DELETE_ALL})"`"
 fi
 
 if [[ $op == export  && $local == 1 ]] ; then
-  ${snowsql_proc_default} -q "CALL SW_EXPORT_RESOURCE('${RT}','${RN}')" > ${RT}_${RN}.yaml
+  check_result "`${snowsql_proc_default} -q "CALL SW_EXPORT_RESOURCE('${RT}','${RN}')" > ${RT}_${RN}.yaml`"
   echo ${RT} ${RN} has been exported to ${RT}_${RN}.yaml.
 fi
 
 
 if [[ $op == import && $local == 0 ]] ; then
-  ${snowsql_proc_default} -q "CALL SW_IMPORT_RESOURCES('${RT}','${RN}',${DELETE_ALL})"
+  check_result "`${snowsql_proc_default} -q "CALL SW_IMPORT_RESOURCES('${RT}','${RN}',${DELETE_ALL})"`"
 fi
 
 
@@ -196,27 +206,27 @@ if [[ $op == import  && $local == 1 ]] ; then
   RDATA=$(cat ${RT}_${RN}.yaml)
   RDATA=${RDATA//\'/\\\'}
   echo "CALL SW_IMPORT_RESOURCE('${RT}','${RN}','${RDATA}')" > tmp.sql
-  ${snowsql_proc_default} -f tmp.sql
+  check_result "`${snowsql_proc_default} -f tmp.sql`"
   rm tmp.sql
   echo ${RT}_${RN}.yaml has been improted.
 fi
 
 # Test job component
 if [[ $op == test && $type == job && "${test_file}" == "" ]] ; then
-  ${snowsql_proc_default} -q "CALL SW_TEST_JOB_COMPONENTS('${job}','${components}')"
+  check_result "`${snowsql_proc_default} -q "CALL SW_TEST_JOB_COMPONENTS('${job}','${components}')"`"
 fi
 
 if [[ $op == test && $type == job && "${test_file}" != "" ]] ; then
   TDATA=$(cat ${test_file})
   TDATA=${TDATA//\'/\\\'}
   echo "CALL SW_TEST_JOB_COMPONENT('${job}','${components}','${TDATA}')" > tmp.sql
-  ${snowsql_proc_default} -f tmp.sql
+  check_result "`${snowsql_proc_default} -f tmp.sql`"
   rm tmp.sql  
 fi
 
 # Test macro lib
 if [[ $op == test && $type == lib && "${lib_file}" == "" ]] ; then
-  ${snowsql_proc_default} -q "CALL SW_TEST_MACRO_LIB('${lib}')"
+  check_result "`${snowsql_proc_default} -q "CALL SW_TEST_MACRO_LIB('${lib}')"`"
 fi
 
 if [[ $op == test && $type == lib && "${lib_file}" != ""  && "${test_file}" != "" ]] ; then
@@ -225,13 +235,13 @@ if [[ $op == test && $type == lib && "${lib_file}" != ""  && "${test_file}" != "
   TDATA=$(cat ${test_file})
   TDATA=${TDATA//\'/\\\'}
   echo "CALL SW_TEST_MACRO_LIB('${lib}','${LDATA}','${TDATA}')" > tmp.sql
-  ${snowsql_proc_default} -f tmp.sql
+  check_result "`${snowsql_proc_default} -f tmp.sql`"
   rm tmp.sql  
 fi
 
 # Test function
 if [[ $op == test && $type == func && "${def_file}" == "" ]] ; then
-  ${snowsql_proc_default} -q "CALL SW_TEST_FUNCTION('${func}')"
+  check_result "`${snowsql_proc_default} -q "CALL SW_TEST_FUNCTION('${func}')"`"
 fi
 
 if [[ $op == test && $type == func && "${def_file}" != "" && "${test_file}" != "" ]] ; then
@@ -240,22 +250,22 @@ if [[ $op == test && $type == func && "${def_file}" != "" && "${test_file}" != "
   TDATA=$(cat ${test_file})
   TDATA=${TDATA//\'/\\\'}
   echo "CALL SW_TEST_FUNCTION('${func}','${LDATA}','${TDATA}')" > tmp.sql
-  ${snowsql_proc_default} -f tmp.sql
+  check_result "`${snowsql_proc_default} -f tmp.sql`"
   rm tmp.sql  
 fi
 
 # Buid
 if [[ $op == build && ${job} == all ]] ; then
-  ${snowsql_proc_default} -q "CALL SW_BUILD_ALL_JOBS()"
+  check_result "`${snowsql_proc_default} -q "CALL SW_BUILD_ALL_JOBS()"`"
 fi
 
 if [[ $op == build && ${job} != all ]] ; then
-  ${snowsql_proc_default} -q "CALL SW_BUILD_JOB('${job}')"
+  check_result "`${snowsql_proc_default} -q "CALL SW_BUILD_JOB('${job}')"`"
 fi
 
 # Preview
 if [[ $op == preview ]] ; then
-  ${snowsql_proc_default} -q "CALL SW_PREVIEW_WEB_REQUEST('${job}')"
+  check_result "`${snowsql_proc_default} -q "CALL SW_PREVIEW_WEB_REQUEST('${job}')"`"
 fi
 
 # Make a test call
@@ -266,5 +276,5 @@ else
 fi
 
 if [[ $op == testcall ]] ; then
-  ${snowsql_proc_default} -q "CALL SW_MAKE_TEST_CALL('${job}',${ENABLE_POSTHOOK})"
+  check_result "`${snowsql_proc_default} -q "CALL SW_MAKE_TEST_CALL('${job}',${ENABLE_POSTHOOK})"`"
 fi
