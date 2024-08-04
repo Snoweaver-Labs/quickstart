@@ -1,31 +1,30 @@
 #!/bin/bash
 
-
 usage() {
   echo '''
-usage:  [get|put] <file>|all [-trunc] [-c value]
-        [import|export] all [-d] [-c value]
-                        type [-c value]
-                        type resource [-l] [-c value]
-        test job <job> [-c value]
-             job <job> <components> [-c value]
-             job <job> <component> <test.j2> [-c value]
-             lib <lib> [-c value]
-             lib <lib> <lib.j2> <test.j2> [-c value]
-             func <func> [-c value]
-             func <func> <def.py> <test.j2> [-c value]
-        build <job>|all [-c value]
-        preview <job> [-c value]
-        testcall job [-c value] [-p]
+usage:  sw  [get|put] <file>|all [-trunc] [-c value]
+            [import|export] all [-d] [-c value]
+                            type [-c value]
+                            type resource [-l] [-c value]
+            test job <job> [-c value]
+                job <job> <components> [-c value]
+                job <job> <component> <test.j2> [-c value]
+                lib <lib> [-c value]
+                lib <lib> <lib.j2> <test.j2> [-c value]
+                func <func> [-c value]
+                func <func> <def.py> <test.j2> [-c value]
+            build <job>|all [-c value]
+            preview <job> [-c value]
+            testcall <job> [-c value] [-p]
 
-      -c: Specifies the connection to be used by SnowSQL.
-          If not specified, it will attempt to use the default connection.
-          If unsuccessful, it will prompt for credentials.
-      -d: `get` - Deletes all .yaml files in the local directory first.
-          `put`,`export` - Purges the CODE stage first.
-          `import` - Erases all project data first.
-      -l: Indicates to export to or import from a local file instead of the CODE stage.
-      -p: Enables the post-hook.
+            -c: Specifies the connection to be used by SnowSQL. 
+                If this option is not provided, SnowSQL will use the default connection. 
+                If the default connection fails, you will be prompted to enter your credentials.
+            -d: `get` - Deletes all .yaml files in the local directory before proceeding.
+                `put`,`export` - Purges the CODE stage prior to execution.
+                `import` - Clears all project data before beginning the import process.
+            -l: Directs Snoweaver to export to or import from a local file instead of the CODE stage.
+            -p: Enables the post-hook functionality.
       '''
 }
 
@@ -41,7 +40,6 @@ while [[ $# -gt 0 && $1 != -* ]]; do
   positional+=("$1")
   shift
 done
-
 
 # Parse options using getopts
 while getopts ":dptlpc:" opt; do
@@ -78,7 +76,7 @@ case $op in
     get | put)
       file=${positional[1]}
       if [[ $file == "" ]] ; then
-        echo "file name or 'all' is required."
+        echo "File name or 'all' is required."
         exit 1
       fi
       ;;
@@ -93,33 +91,41 @@ case $op in
               job=${positional[2]}
               components=${positional[3]}
               test_file=${positional[4]}
-            ;;
+              ;;
             lib)
               lib=${positional[2]}
               lib_file=${positional[3]}
               test_file=${positional[4]}
               if [[ "${lib_file}" != "" && "${test_file}" == "" ]] ; then
-                echo "Error: test file is required."
+                echo "Test file is required."
                 exit 1
               fi
-            ;;
+              ;;
             func)
               func=${positional[2]}
               def_file=${positional[3]}
               test_file=${positional[4]}
               if [[ "${def_file}" != "" && "${test_file}" == "" ]] ; then
-                echo "Error: test file is required."
+                echo "Test file is required."
                 exit 1
-              fi              
-            ;;                        
+              fi
+              ;;
+            *)
+              echo "Invalid option - ${positional[1]}." >&2
+              exit 1
+              ;;                        
       esac
       ;;
     build | preview | testcall)
       job=${positional[1]}
-      ;;
+      ;;    
     "")
       usage
       ;;
+    *)
+      echo "Invalid option - ${positional[0]}." >&2
+      exit 1
+      ;;        
 esac
 
 
@@ -153,16 +159,17 @@ fi
 
 if [[ $op == put ]] ; then
   snowsql -o log_level=DEBUG  ${conn} -q "PUT file://${PATTERN} @CODE/ AUTO_COMPRESS=FALSE OVERWRITE=TRUE"
+  snowsql -o log_level=DEBUG  ${conn} -q "ALTER STAGE CODE REFRESH"
 fi
 
 check_result(){
   local result=$1
-  status=`echo $result | jq -r '.status'`
+  status=`echo "$result" | jq -r '.status'`
   if [[ $status == failed ]] ; then
-    echo $result | jq -r '.data' >&2
+    echo "$result" | jq -r '.data' >&2
     exit 1
   else
-    echo $result | jq -r '.data'
+    echo "$result" | jq -r '.data'
   fi
 }
 
@@ -192,7 +199,7 @@ if [[ $op == export && $local == 0 ]] ; then
 fi
 
 if [[ $op == export  && $local == 1 ]] ; then
-  check_result "`${snowsql_proc_default} -q "CALL SW_EXPORT_RESOURCE('${RT}','${RN}')" > ${RT}_${RN}.yaml`"
+  check_result "`${snowsql_proc_default} -q "CALL SW_EXPORT_RESOURCE('${RT}','${RN}')"`" > ${RT}_${RN}.yaml
   echo ${RT} ${RN} has been exported to ${RT}_${RN}.yaml.
 fi
 
@@ -208,7 +215,6 @@ if [[ $op == import  && $local == 1 ]] ; then
   echo "CALL SW_IMPORT_RESOURCE('${RT}','${RN}','${RDATA}')" > tmp.sql
   check_result "`${snowsql_proc_default} -f tmp.sql`"
   rm tmp.sql
-  echo ${RT}_${RN}.yaml has been improted.
 fi
 
 # Test job component
@@ -254,13 +260,13 @@ if [[ $op == test && $type == func && "${def_file}" != "" && "${test_file}" != "
   rm tmp.sql  
 fi
 
-# Buid
+# Build
 if [[ $op == build && ${job} == all ]] ; then
-  check_result "`${snowsql_proc_default} -q "CALL SW_BUILD_ALL_JOBS()"`"
+  check_result "`${snowsql_proc_default} -q "CALL SW_BUILD_INSTANCE('*')"`"
 fi
 
 if [[ $op == build && ${job} != all ]] ; then
-  check_result "`${snowsql_proc_default} -q "CALL SW_BUILD_JOB('${job}')"`"
+  check_result "`${snowsql_proc_default} -q "CALL SW_BUILD_INSTANCE('${job}')"`"
 fi
 
 # Preview
